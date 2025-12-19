@@ -1,133 +1,152 @@
-import json, time, requests, os, random, urllib.parse, pytumblr
+import json
+import time
+import requests
+import os
+import random
+import urllib.parse
+import feedparser
+import pytumblr
 from groq import Groq
 from gnews import GNews
-from flask import Flask
-from threading import Thread
+from requests.auth import HTTPBasicAuth
 
-# --- 1. سيرفر البقاء حياً ---
-app = Flask('')
-@app.route('/')
-def home(): return "Manhuw Elite Bot (Relevant Images) is Live!"
-
-def run(): app.run(host='0.0.0.0', port=8080)
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# --- 2. الإعدادات والمفاتيح ---
-GROQ_API_KEY = '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'
-MODEL_NAME = "llama-3.3-70b-versatile"
-client_groq = Groq(api_key=GROQ_API_KEY)
-
-# إعدادات ووردبريس وتومبلر
-WP_ENDPOINT = 'https://manhuw.com/wp-json/external/v1/manga/import-review?secret=12345'
-TUMBLR_BLOG_NAME = 'manhuw'
-TUMBLR_KEYS = {
-    "consumer_key": 'zantmn4dLmmHc3tJKrUpgSJpc9HG2KU1H07OQS4gBr29fn8tXG',
-    "consumer_secret": 'AJdDLCxUpFTJDRsSLOzsau7ZplUSmNJOPPDl1hqRycfd7XICb8',
-    "oauth_token": 'cJQOHlnE5uhjTENcRzwPyuNSQZKafa9HVdq44Z0BMm2Ksp17l6',
-    "oauth_secret": 'M4uN8gV9FJYq6wTW9D4vujJX4mPnMzqsRFy9Te4yVCkbQZQHki'
+# ==========================================
+# 🔑 الإعدادات والمفاتيح (كلها تعمل عبر Groq)
+# ==========================================
+CONFIG = {
+    "GROQ_KEY": "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",
+    "WP_USER": "Manhuw",
+    "WP_APP_PASS": "lkA0 EVHS rGMI 6Vk6 PX1t tyYa",
+    "WP_ENDPOINT_IMPORT": 'https://manhuw.com/wp-json/external/v1/manga/import-review?secret=12345',
+    "WP_BASE_URL": "https://manhuw.com/wp-json/wp/v2/posts",
+    "MASTODON_TOKEN": "amr7lcgKxY3XGL_ZtWLLpASbPEmwm0SYLTr_ICT0QCA",
+    "DSC_WEBHOOK": "https://discord.com/api/webhooks/1451099896387080355/G1WqUdvGFVjfJMH5aJnbt_PxOlkm2X-yM1mWwows7hWMwGz4DMIUcEff8GGEReYBCFPr",
+    "TUMBLR_BLOG": "manhuw",
+    "TUMBLR_KEYS": {
+        "ck": "zantmn4dLmmHc3tJKrUpgSJpc9HG2KU1H07OQS4gBr29fn8tXG",
+        "cs": "AJdDLCxUpFTJDRsSLOzsau7ZplUSmNJOPPDl1hqRycfd7XICb8",
+        "tk": "cJQOHlnE5uhjTENcRzwPyuNSQZKafa9HVdq44Z0BMm2Ksp17l6",
+        "ts": "M4uN8gV9FJYq6wTW9D4vujJX4mPnMzqsRFy9Te4yVCkbQZQHki"
+    },
+    "RSS_FEED": "https://manhuw.com/manhwa-reviews-2/feed/",
+    "MEM_WP": "published_urls.txt",
+    "MEM_SOCIAL": "marketing_history.txt",
+    "MEM_TUMBLR": "posted_links.txt"
 }
-MEMORY_FILE = "published_urls.txt"
 
-# --- 3. دالة توليد المقالة (1200 كلمة + قسم التعليقات) ---
-def generate_pro_article(title, task_type):
-    prompt = f"""
-    Write a 1200-word professional SEO article in English about: {title}.
-    Category: {task_type}.
-    
-    INSTRUCTIONS:
-    - Structure: Use H2 and H3 subheadings (Min 6).
-    - Content: Professional, deep, and investigative.
-    - NO JP/KR characters.
-    
-    DYNAMIC COMMENTS SECTION:
-    At the very end, include this EXACT HTML:
-    <div style="background:#f0faff; border-top:5px solid #00aeef; padding:30px; margin-top:50px; border-radius:15px; font-family:sans-serif; text-align:center;">
-        <h3 style="color:#0078a3;">💬 What's Your Take?</h3>
-        <p style="color:#333; font-size:17px; line-height:1.6;">[WRITE_A_UNIQUE_ENGAGING_MESSAGE_FOR_THIS_TOPIC]</p>
-        <p style="color:#555; font-weight:bold;">Drop your thoughts in the comments below, we’d love to hear from you!</p>
-    </div>
+# تهيئة العملاء
+client = Groq(api_key=CONFIG["GROQ_KEY"])
+tumblr_client = pytumblr.TumblrRestClient(
+    CONFIG["TUMBLR_KEYS"]["ck"], CONFIG["TUMBLR_KEYS"]["cs"],
+    CONFIG["TUMBLR_KEYS"]["tk"], CONFIG["TUMBLR_KEYS"]["ts"]
+)
 
-    Return ONLY JSON: {{"post_title": "..", "post_content": "..", "post_excerpt": "..", "yoast_focus_keyword": ".."}}
-    """
-    try:
-        completion = client_groq.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(completion.choices[0].message.content)
-    except Exception as e:
-        print(f"❌ AI Error: {e}")
-        return None
+# --- دالات الذاكرة ومنع التكرار ---
+def is_published(file, item):
+    if not os.path.exists(file): return False
+    with open(file, "r") as f: return str(item) in f.read().splitlines()
 
-# --- 4. المهمة الشاملة ---
-def start_mission():
-    print("🚀 Starting Manhuw Engine (Relevant Images Focus)...")
-    
+def mark_published(file, item):
+    with open(file, "a") as f: f.write(str(item) + "\n")
+
+# ==========================================
+# 📝 1. محرك إنتاج المحتوى الضخم (13 مقالاً)
+# ==========================================
+def generate_long_articles():
+    print("🚀 البدء في توليد 13 مقالاً طويلاً...")
     tasks = [
         {'type': 'Breaking News & Leaks', 'cat': 382, 'count': 7, 'query': 'anime manga leaks spoilers'},
         {'type': 'Anime Comparison', 'cat': 381, 'count': 2, 'query': 'trending anime series review'},
         {'type': 'Manga Review', 'cat': 379, 'count': 2, 'query': 'manga chapter analysis'},
         {'type': 'Manhwa Review', 'cat': 281, 'count': 2, 'query': 'popular manhwa webtoon'}
     ]
-    
-    total_published = 0
+    total = 0
     for task in tasks:
-        gn = GNews(language='en', period='3d')
+        gn = GNews(language='en', period='7d')
         news = gn.get_news(task['query'])
-        
-        category_count = 0
+        count = 0
         for item in news:
-            if category_count >= task['count']: break
-            if os.path.exists(MEMORY_FILE) and item['url'] in open(MEMORY_FILE).read(): continue
-
-            print(f"📡 Generating for Category {task['cat']}: {item['title'][:40]}...")
-            data = generate_pro_article(item['title'], task['type'])
+            if count >= task['count'] or is_published(CONFIG["MEM_WP"], item['url']): continue
             
-            if data:
-                # --- تعديل جوهري لضمان صلة الصورة بالموضوع ---
-                # نستخدم الكلمة المفتاحية الدقيقة أو عنوان الخبر مباشرة بدون إضافات عامة
-                topic_for_image = data.get('yoast_focus_keyword', item['title'])
-                safe_topic = urllib.parse.quote(topic_for_image)
-                # أزلنا random seed لكي يعطينا أنسب صورة للموضوع دائماً
-                data['featured_image_url'] = f"https://image.pollinations.ai/prompt/{safe_topic}?width=1280&height=720&nologo=true"
+            prompt = f"Write a 1500-word professional SEO article about: {item['title']}. Use H2/H3 tags. Return ONLY JSON: {{\"post_title\": \"..\", \"post_content\": \"..\", \"yoast_focus_keyword\": \"..\"}}"
+            try:
+                res = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+                data = json.loads(res.choices[0].message.content)
                 
+                # توليد صورة مطابقة للمحتوى
+                topic = data.get('yoast_focus_keyword', item['title'])
+                safe_topic = urllib.parse.quote(f"{topic} anime manga high resolution")
+                data['featured_image_url'] = f"https://image.pollinations.ai/prompt/{safe_topic}?width=1280&height=720&seed={random.randint(1,9999)}.jpg"
                 data['categories'] = [task['cat']]
+                
+                wp_res = requests.post(CONFIG["WP_ENDPOINT_IMPORT"], json=data, timeout=60)
+                if wp_res.status_code == 200:
+                    mark_published(CONFIG["MEM_WP"], item['url'])
+                    total += 1
+                    count += 1
+                    print(f"✅ تم نشر مقال: {data['post_title']} في ووردبريس")
+            except Exception as e:
+                print(f"❌ خطأ في إنتاج المقال: {e}")
+            time.sleep(15)
+    print(f"🏁 تم الانتهاء من نشر {total} مقالات بنجاح.")
 
-                try:
-                    res = requests.post(WP_ENDPOINT, json=data, verify=False, timeout=60)
-                    if res.status_code == 200:
-                        post_id = res.json().get('id', 'latest')
-                        article_link = f"https://manhuw.com/?p={post_id}"
-                        print(f"✅ WP Live (Relevant Image): {data['post_title']}")
+# ==========================================
+# 📢 2. التسويق الاجتماعي (Discord & Mastodon) - 3 يومياً
+# ==========================================
+def run_social_marketing():
+    print("📡 فحص المقالات الجديدة للنشر الاجتماعي (الحد 3)...")
+    try:
+        res = requests.get(f"{CONFIG['WP_BASE_URL']}?_embed&per_page=10", auth=HTTPBasicAuth(CONFIG["WP_USER"], CONFIG["WP_APP_PASS"]))
+        if res.status_code != 200: return
+        posts, shared = res.json(), 0
+        for post in posts:
+            if shared >= 3 or is_published(CONFIG["MEM_SOCIAL"], post['id']): continue
+            
+            title, link = post['title']['rendered'], post['link']
+            teaser_prompt = f"Write a 300-word viral English teaser for: {title}. Focus on mystery and link: {link}"
+            teaser = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": teaser_prompt}]).choices[0].message.content
+            
+            # Mastodon
+            requests.post("https://mastodon.social/api/v1/statuses", headers={"Authorization": f"Bearer {CONFIG['MASTODON_TOKEN']}"}, data={"status": f"🔥 {title}\n\n{teaser[:400]}...\n🔗 {link}"})
+            # Discord
+            requests.post(CONFIG["DSC_WEBHOOK"], json={"embeds": [{"title": title, "url": link, "description": teaser[:350], "color": 15158332}]})
+            
+            mark_published(CONFIG["MEM_SOCIAL"], post['id'])
+            shared += 1
+            print(f"📢 تم تسويق: {title}")
+            time.sleep(20)
+    except Exception as e: print(f"❌ خطأ في التسويق: {e}")
 
-                        # تسويق تومبلر
-                        t_prompt = f"Create a short Tumblr teaser for: {data['post_title']}. Call to action link: {article_link}. Return JSON: {{\"title\":\"..\", \"body\":\"..\", \"tags\":[\"..\"]}}"
-                        t_res = client_groq.chat.completions.create(model=MODEL_NAME, messages=[{"role": "user", "content": t_prompt}], response_format={"type": "json_object"})
-                        t_data = json.loads(t_res.choices[0].message.content)
-                        
-                        if t_data:
-                            t_client = pytumblr.TumblrRestClient(TUMBLR_KEYS["consumer_key"], TUMBLR_KEYS["consumer_secret"], TUMBLR_KEYS["oauth_token"], TUMBLR_KEYS["oauth_secret"])
-                            t_client.create_text(TUMBLR_BLOG_NAME, state="published", title=t_data['title'], body=t_data['body'] + f"<br><br><a href='{article_link}'>Read Full 1200+ Words Article Here</a>", tags=t_data['tags'])
-                            print(f"✅ Tumblr Teaser Active!")
+# ==========================================
+# 🎨 3. محرك Tumblr (عبر Groq Llama-3) - 3 يومياً
+# ==========================================
+def run_tumblr_syndication():
+    print("🎨 فحص RSS للنشر على Tumblr (الحد 3)...")
+    try:
+        feed = feedparser.parse(CONFIG["RSS_FEED"])
+        processed = 0
+        for entry in feed.entries:
+            if processed >= 3 or is_published(CONFIG["MEM_TUMBLR"], entry.link): continue
+            
+            prompt = f"Create a clickbait Tumblr post for: {entry.title}. Link: {entry.link}. Use HTML for clickable links. Return JSON: {{\"title\": \"..\", \"body\": \"..\", \"tags\": [\"..\"]}}"
+            res = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+            data = json.loads(res.choices[0].message.content)
+            
+            tumblr_client.create_text(CONFIG["TUMBLR_BLOG"], state="published", title=data['title'], body=data['body'], tags=data['tags'])
+            mark_published(CONFIG["MEM_TUMBLR"], entry.link)
+            processed += 1
+            print(f"✅ تم النشر على Tumblr: {data['title']}")
+            time.sleep(20)
+    except Exception as e: print(f"❌ خطأ في تامبلر: {e}")
 
-                        with open(MEMORY_FILE, "a") as f: f.write(item['url'] + "\n")
-                        category_count += 1
-                        total_published += 1
-                        print("Sleeping 5 mins to avoid 429 error...")
-                        time.sleep(300) 
-                except Exception as e:
-                    print(f"Error: {e}")
-
+# ==========================================
+# 🚀 الحلقة اللانهائية (Render Background Worker)
+# ==========================================
 if __name__ == "__main__":
-    keep_alive()
     while True:
-        try:
-            start_mission()
-            print("🏁 Finished all 13 articles. Sleeping 24h...")
-            time.sleep(86400)
-        except Exception as e:
-            print(f"Global Error: {e}")
-            time.sleep(600)
+        print(f"⏰ بدء الدورة اليومية: {time.ctime()}")
+        generate_long_articles()
+        run_social_marketing()
+        run_tumblr_syndication()
+        print("😴 اكتملت المهمة. بانتظار 24 ساعة...")
+        time.sleep(86400) # انتظار يوم كامل
