@@ -1,4 +1,3 @@
-
 import json, time, requests, os, random, urllib.parse, feedparser, pytumblr, urllib3
 from groq import Groq
 from gnews import GNews
@@ -15,7 +14,7 @@ def run_p():
     except: pass
 
 # ==========================================
-# 🔑 الإعدادات النهائية (بما فيها توكن Mastodon)
+# 🔑 الإعدادات (تم ضبط Mastodon وتوزيع المقالات)
 # ==========================================
 CONFIG = {
     "GROQ_KEYS": [
@@ -35,7 +34,7 @@ CONFIG = {
         "ts": "M4uN8gV9FJYq6wTW9D4vujJX4mPnMzqsRFy9Te4yVCkbQZQHki"
     },
     "RSS_FEED": "https://manhuw.com/manhwa-reviews-2/feed/",
-    "MEM_WP": "wp_v_final.txt", "MEM_SOC": "soc_v_final.txt"
+    "MEM_WP": "wp_v_final_13.txt", "MEM_SOC": "soc_v_final_13.txt"
 }
 
 def get_groq(): return Groq(api_key=random.choice(CONFIG["GROQ_KEYS"]))
@@ -47,12 +46,12 @@ def set_done(f, v): open(f, "a").write(str(v) + "\n")
 # ==========================================
 def run_wp():
     print("🛰️ WP Engine Starting: Preparing 13 Articles...")
-    # تم ضبط التوزيع كما طلبت: 7 تسريبات، 2 مقارنات، 2 مانجا، 2 مانهوا
+    # التوزيع: 7 تسريبات (382)، 2 مقارنات (381)، 2 مانجا (379)، 2 مانهوا (281)
     tasks = [
-        {'id': 382, 'n': 7, 'q': 'anime leaks spoilers news'},   # 7 مقالات تسريبات وأخبار
-        {'id': 381, 'n': 2, 'q': 'trending anime series review'}, # 2 مقالات مقارنات
-        {'id': 379, 'n': 2, 'q': 'manga chapter review analysis'}, # 2 مقالات تقييم مانجا
-        {'id': 281, 'n': 2, 'q': 'popular manhwa webtoon review'}  # 2 مقالات تقييم مانهوا
+        {'id': 382, 'n': 7, 'q': 'anime manga leaks spoilers news'},   
+        {'id': 381, 'n': 2, 'q': 'trending anime series review comparison'}, 
+        {'id': 379, 'n': 2, 'q': 'manga chapter review analysis'}, 
+        {'id': 281, 'n': 2, 'q': 'popular manhwa webtoon review'}  
     ]
     
     for t in tasks:
@@ -62,26 +61,33 @@ def run_wp():
             if count >= t['n'] or is_done(CONFIG["MEM_WP"], n['url']): continue
             try:
                 client = get_groq()
-                prompt = f"Write a 1500-word professional SEO article about: {n['title']}. Structure with at least 3 subheadings (H2/H3). Return ONLY JSON: post_title, post_content, yoast_focus_keyword."
+                prompt = f"Write a 1500-word professional SEO article about: {n['title']}. Structure with H2/H3 subheadings. Return ONLY JSON: post_title, post_content, yoast_focus_keyword."
                 
                 res = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
                 data = json.loads(res.choices[0].message.content)
                 data['categories'] = [t['id']]
                 
-                # إضافة المربع الأزرق السماوي الاحترافي في النهاية
-                data['post_content'] += f'\n\n<div style="background:#e0f7fa; border:2px solid #00bcd4; padding:25px; margin-top:30px; border-radius:15px; text-align:center;"><h3 style="color:#00838f;">💬 Join the Discussion!</h3><p style="color:#006064;">We want to hear from you! What do you think about {n["title"]}? Share your thoughts in the comments below!</p></div>'
+                # المربع الأزرق السماوي التفاعلي
+                data['post_content'] += f'\n\n<div style="background:#e0f7fa; border:2px solid #00bcd4; padding:25px; margin-top:30px; border-radius:15px; text-align:center;"><h3 style="color:#00838f;">💬 Join the Discussion!</h3><p style="color:#006064;">Share your thoughts on {n["title"]} in the comments below!</p></div>'
                 
                 # توليد الصورة المميزة
                 img_q = urllib.parse.quote(f"{data.get('yoast_focus_keyword', n['title'])} anime")
                 data['featured_image_url'] = f"https://image.pollinations.ai/prompt/{img_q}?width=1280&height=720&nologo=true&seed={random.randint(1,999)}.jpg"
 
                 # النشر (مع تجاوز حماية Cloudflare)
-                headers = {"User-Agent": "Manhuw-Render-Bot"}
-                requests.post(CONFIG["WP_ENDPOINT"], json=data, headers=headers, verify=False, timeout=60)
+                headers = {
+                    "User-Agent": "Manhuw-Render-Bot",
+                    "Content-Type": "application/json"
+                }
+                r = requests.post(CONFIG["WP_ENDPOINT"], json=data, headers=headers, verify=False, timeout=60)
                 
-                set_done(CONFIG["MEM_WP"], n['url']); count += 1; print(f"✅ Published to Category ID: {t['id']}")
-                time.sleep(30) # انتظار لتجنب الحظر
-            except: pass
+                if r.status_code == 200:
+                    set_done(CONFIG["MEM_WP"], n['url']); count += 1; print(f"✅ Published Category {t['id']}")
+                else:
+                    print(f"⚠️ WP Error {r.status_code} for ID {t['id']}")
+                time.sleep(30) 
+            except Exception as e:
+                print(f"❌ WP Processing Error: {e}")
 
 # ==========================================
 # 📢 محرك السوشيال (Tumblr + Discord + Mastodon)
@@ -101,23 +107,22 @@ def run_social():
             
             # 1. Tumblr
             tumblr_cl.create_text(CONFIG["TUMBLR_BLOG"], title=soc_data['title'], body=soc_data['body'], tags=["anime", "manhwa"])
-            
             # 2. Discord
             requests.post(CONFIG["DSC_WEBHOOK"], json={"content": f"🔥 **New Update**: {e.title}\n{e.link}"})
-            
             # 3. Mastodon
             mast_headers = {"Authorization": f"Bearer {CONFIG['MASTODON_TOKEN']}"}
             mast_data = {"status": f"🚀 {e.title}\n\nRead more: {e.link} #anime #manga"}
             requests.post(f"{CONFIG['MASTODON_INSTANCE']}/api/v1/statuses", headers=mast_headers, data=mast_data)
             
-            set_done(CONFIG["MEM_SOC"], e.link); print("✅ Social Hub Synced Successfully")
+            set_done(CONFIG["MEM_SOC"], e.link); print("✅ Social Hub Synced")
             time.sleep(15)
-    except: pass
+    except Exception as ex:
+        print(f"❌ Social Sync Error: {ex}")
 
 if __name__ == "__main__":
     threading.Thread(target=run_p, daemon=True).start()
     while True:
         run_wp()
         run_social()
-        print("😴 All tasks finished. Sleeping 6 hours...")
+        print("😴 Cycle complete. Sleeping 6 hours...")
         time.sleep(21600)
