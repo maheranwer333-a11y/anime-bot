@@ -1,4 +1,6 @@
+
 groq
+pytumblr
+feedparser
 gnews
 requests
-flask
